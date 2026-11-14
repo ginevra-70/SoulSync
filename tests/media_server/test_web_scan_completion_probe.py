@@ -135,3 +135,108 @@ def test_time_heuristic_fallback_when_probe_unavailable(clock, monkeypatch):
     _tick_to(mgr, now, 301)
 
     assert fired == ["completed"]
+
+def test_exact_state_finishes_fast_scan_before_five_minute_fallback(clock, monkeypatch):
+    now, fired = clock
+
+    class _ExactStateClient:
+        def get_scan_state(self):
+            return {"scanning": False, "last_scan": "new-finished-at"}
+
+        def is_library_scanning(self):
+            pytest.fail("exact state should finish before the five-minute probe")
+
+    engine = SimpleNamespace(client=lambda name: _ExactStateClient())
+    mgr = wsm.WebScanManager(media_server_engine=engine, delay_seconds=60)
+    mgr._current_server_type = "music_assistant"
+    mgr._scan_start_time = time.time()
+    mgr._scan_baseline = {"scanning": False, "last_scan": "old-finished-at"}
+    mgr.add_scan_completion_callback(lambda: fired.append("completed"))
+    mgr._start_periodic_completion_check()
+
+    _tick_to(mgr, now, wsm.WebScanManager.EXACT_POLL_SECONDS)
+
+    assert fired == ["completed"]
+
+
+class _TaskMonitorClient:
+    def __init__(self, state):
+        self.state = state
+        self.calls = 0
+
+    def get_scan_state(self):
+        self.calls += 1
+        return self.state
+
+    def is_library_scanning(self):
+        pytest.fail("Music Assistant task outcomes must not use the generic probe")
+
+
+def _task_monitor_manager(client, fired, monkeypatch):
+    engine = SimpleNamespace(client=lambda name: client)
+    mgr = wsm.WebScanManager(media_server_engine=engine, delay_seconds=60)
+    mgr._current_server_type = "music_assistant"
+    mgr._scan_start_time = time.time()
+    mgr._scan_in_progress = True
+    mgr._scan_baseline = {"task_monitor": True, "scanning": False, "outcome": None}
+    mgr.add_scan_completion_callback(lambda: fired.append("completed"))
+    mgr._start_periodic_completion_check()
+    return mgr
+
+
+def test_music_assistant_success_outcome_alone_runs_completion_callback(clock, monkeypatch):
+    now, fired = clock
+    client = _TaskMonitorClient({
+        "task_monitor": True, "scanning": False, "outcome": "success",
+    })
+    mgr = _task_monitor_manager(client, fired, monkeypatch)
+
+    _tick_to(mgr, now, wsm.WebScanManager.EXACT_POLL_SECONDS)
+
+    assert fired == ["completed"]
+    assert mgr.get_scan_status()["last_result"]["outcome"] == "success"
+
+
+@pytest.mark.parametrize("outcome", [
+    "partial_success", "failed", "cancelled", "already_running", "unknown",
+])
+def test_music_assistant_non_success_outcomes_never_run_callbacks(
+        clock, monkeypatch, outcome):
+    now, fired = clock
+    client = _TaskMonitorClient({
+        "task_monitor": True, "scanning": False, "outcome": outcome,
+    })
+    mgr = _task_monitor_manager(client, fired, monkeypatch)
+
+    _tick_to(mgr, now, wsm.WebScanManager.EXACT_POLL_SECONDS)
+
+    assert fired == []
+    assert mgr.get_scan_status()["last_result"]["outcome"] == outcome
+    assert mgr.get_scan_status()["status"] == "idle"
+
+
+def test_music_assistant_running_task_has_no_timeout_based_success(clock, monkeypatch):
+    now, fired = clock
+    client = _TaskMonitorClient({
+        "task_monitor": True, "scanning": True, "outcome": "running",
+    })
+    mgr = _task_monitor_manager(client, fired, monkeypatch)
+    mgr._max_scan_time = 1
+
+    _tick_to(mgr, now, 2_000)
+
+    assert fired == []
+    assert mgr._scan_in_progress is True
+    assert _CaptureTimer.captured["delay"] == wsm.WebScanManager.EXACT_POLL_SECONDS
+
+
+def test_music_assistant_unreadable_state_keeps_waiting_without_success(clock, monkeypatch):
+    now, fired = clock
+    client = _TaskMonitorClient(None)
+    mgr = _task_monitor_manager(client, fired, monkeypatch)
+
+    _tick_to(mgr, now, 2_000)
+
+    assert fired == []
+    assert mgr._scan_in_progress is True
+    assert _CaptureTimer.captured["delay"] == wsm.WebScanManager.EXACT_POLL_SECONDS

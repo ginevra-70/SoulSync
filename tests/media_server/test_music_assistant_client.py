@@ -93,7 +93,17 @@ class Fake:
         if command.endswith('/count'):
             return 3
         if command == 'music/sync':
-            return [{'task_id': 't-sync', 'status': 'pending'}]
+            return [{
+                'id': f'music_sync_{SRC}_track',
+                'status': 'pending',
+                'started_at': None,
+                'metadata': {
+                    'task_domain': 'music_sync',
+                    'provider_instance': SRC,
+                    'provider_domain': 'filesystem_local',
+                    'media_type': 'track',
+                },
+            }]
         if command == 'music/search':
             return {'tracks': [TRACK]}
         if command == 'music/playlists/library_items':
@@ -240,6 +250,224 @@ def test_recently_added_stats_scan_and_search(client):
     hits = client.search_tracks('Song C', 'Artist A')
     assert len(hits) == 1 and hits[0].id == '700' and hits[0].artist == 'Artist A' and hits[0].duration == 61000
     assert [c for c in client.fake.calls if c[0] == 'music/search'][-1][1]['library_only'] is True
+
+
+def _scan_task(status, started_at=None, *, task_id=None, media_type='track',
+               instance=SRC, domain='filesystem_local'):
+    return {
+        'id': task_id or f'music_sync_{instance}_{media_type}',
+        'name': 'Sync Tracks for Filesystem (local disk)',
+        'status': status,
+        'started_at': started_at,
+        'finished_at': None,
+        'updated_at': started_at,
+        'last_run': started_at,
+        'metadata': {
+            'task_domain': 'music_sync',
+            'provider_instance': instance,
+            'provider_domain': domain,
+            'media_type': media_type,
+        },
+    }
+
+
+def test_scan_state_monitors_only_music_sync_return_ids_and_new_started_at(client):
+    old_start = '2026-11-14T09:00:00+00:00'
+    new_start = '2026-11-14T09:01:00+00:00'
+    task_states = iter([
+        [
+            _scan_task('success', old_start),
+            _scan_task('running', '2026-11-14T08:00:00+00:00',
+                       instance='filesystem_local--other'),
+            {'id': 'global-sync', 'name': 'Fix sync group members', 'status': 'running'},
+        ],
+        [
+            _scan_task('running', new_start),
+            _scan_task('running', '2026-11-14T09:02:00+00:00',
+                       instance='filesystem_local--other'),
+            {'id': 'global-sync', 'name': 'Fix sync group members', 'status': 'running'},
+        ],
+        [
+            {**_scan_task('success', new_start),
+             'finished_at': '2026-11-14T09:01:05+00:00'},
+            _scan_task('running', '2026-11-14T09:03:00+00:00',
+                       instance='filesystem_local--other'),
+            {'id': 'global-sync', 'name': 'Fix sync group members', 'status': 'running'},
+        ],
+    ])
+
+    def transport(command, args):
+        if command == 'tasks/list':
+            return next(task_states)
+        if command == 'music/sync':
+            return [_scan_task('pending', None)]
+        return client.fake(command, args)
+
+    client._transport = transport
+    baseline = client.get_scan_state()
+    assert baseline['task_monitor'] is True
+    assert client.trigger_library_scan() is True
+    running = client.get_scan_state()
+    completed = client.get_scan_state()
+
+    assert running['scanning'] is True
+    assert running['outcome'] == 'running'
+    assert completed['scanning'] is False
+    assert completed['outcome'] == 'success'
+    assert client._scan_task_ids == {f'music_sync_{SRC}_track'}
+
+
+@pytest.mark.parametrize(('status', 'expected_outcome', 'scanning'), [
+    ('pending', 'running', True),
+    ('running', 'running', True),
+    ('success', 'success', False),
+    ('partial_success', 'partial_success', False),
+    ('failed', 'failed', False),
+    ('cancelled', 'cancelled', False),
+    ('idle', 'unknown', False),
+    ('unknown', 'unknown', False),
+    ('future_status', 'unknown', False),
+    ('', 'unknown', False),
+])
+def test_scan_state_distinguishes_music_assistant_task_outcomes(
+        client, status, expected_outcome, scanning):
+    old_start = '2026-11-14T09:00:00+00:00'
+    new_start = '2026-11-14T09:01:00+00:00'
+    baseline_task = _scan_task('success', old_start)
+    requested_task = _scan_task(
+        status,
+        None if status == 'pending' else new_start,
+    )
+    polled_task = _scan_task(
+        status,
+        None if status == 'pending' else new_start,
+    )
+    if status in ('success', 'partial_success', 'failed', 'cancelled'):
+        polled_task['finished_at'] = '2026-11-14T09:01:05+00:00'
+    responses = iter([[baseline_task], [polled_task]])
+
+    def transport(command, args):
+        if command == 'tasks/list':
+            return next(responses)
+        if command == 'music/sync':
+            return [requested_task]
+        return client.fake(command, args)
+
+    client._transport = transport
+    client.get_scan_state()
+    assert client.trigger_library_scan() is True
+    state = client.get_scan_state()
+
+    assert state['scanning'] is scanning
+    assert state['outcome'] == expected_outcome
+
+
+def test_scan_state_does_not_reuse_a_preexisting_running_task(client):
+    started_at = '2026-11-14T09:00:00+00:00'
+    task_states = iter([[_scan_task('running', started_at)], [_scan_task('running', started_at)]])
+
+    def transport(command, args):
+        if command == 'tasks/list':
+            return next(task_states)
+        if command == 'music/sync':
+            return [_scan_task('running', started_at)]
+        return client.fake(command, args)
+
+    client._transport = transport
+    client.get_scan_state()
+    assert client.trigger_library_scan() is True
+    state = client.get_scan_state()
+
+    assert state['scanning'] is False
+    assert state['outcome'] == 'already_running'
+
+
+def test_scan_state_reports_already_running_when_other_requested_tasks_succeed(client):
+    old_track_start = '2026-11-14T09:00:00+00:00'
+    old_album_start = '2026-11-14T08:00:00+00:00'
+    old_playlist_start = '2026-11-14T07:00:00+00:00'
+    new_album_start = '2026-11-14T09:01:00+00:00'
+    new_playlist_start = '2026-11-14T09:02:00+00:00'
+
+    baseline_tasks = [
+        _scan_task('running', old_track_start, media_type='track'),
+        _scan_task('success', old_album_start, media_type='album'),
+        _scan_task('success', old_playlist_start, media_type='playlist'),
+    ]
+    requested_tasks = [
+        _scan_task('running', old_track_start, media_type='track'),
+        _scan_task('pending', None, media_type='album'),
+        _scan_task('pending', None, media_type='playlist'),
+    ]
+    completed_tasks = [
+        _scan_task('running', old_track_start, media_type='track'),
+        _scan_task('success', new_album_start, media_type='album'),
+        _scan_task('success', new_playlist_start, media_type='playlist'),
+    ]
+    task_states = iter([baseline_tasks, completed_tasks])
+
+    def transport(command, args):
+        if command == 'tasks/list':
+            return next(task_states)
+        if command == 'music/sync':
+            return requested_tasks
+        return client.fake(command, args)
+
+    client._transport = transport
+    client.get_scan_state()
+    assert client.trigger_library_scan() is True
+    state = client.get_scan_state()
+
+    assert state['task_statuses'] == {
+        f'music_sync_{SRC}_track': 'running',
+        f'music_sync_{SRC}_album': 'success',
+        f'music_sync_{SRC}_playlist': 'success',
+    }
+    assert state['scanning'] is False
+    assert state['outcome'] == 'already_running'
+
+
+def test_scan_state_requires_baseline_to_verify_running_generation(client):
+    started_at = '2026-11-14T09:01:00+00:00'
+    responses = iter([[], [_scan_task('running', started_at)]])
+
+    def transport(command, args):
+        if command == 'tasks/list':
+            return next(responses)
+        if command == 'music/sync':
+            return [_scan_task('running', started_at)]
+        return client.fake(command, args)
+
+    client._transport = transport
+    client.get_scan_state()
+    assert client.trigger_library_scan() is True
+    state = client.get_scan_state()
+
+    assert state['scanning'] is False
+    assert state['outcome'] == 'unknown'
+    assert state['unverified_task_ids'] == [f'music_sync_{SRC}_track']
+
+
+def test_scan_state_never_treats_missing_returned_task_as_success(client):
+    task = _scan_task('success', '2026-11-14T09:00:00+00:00')
+    requested = _scan_task('pending', None)
+    responses = iter([[task], []])
+
+    def transport(command, args):
+        if command == 'tasks/list':
+            return next(responses)
+        if command == 'music/sync':
+            return [requested]
+        return client.fake(command, args)
+
+    client._transport = transport
+    client.get_scan_state()
+    assert client.trigger_library_scan() is True
+    state = client.get_scan_state()
+
+    assert state['scanning'] is False
+    assert state['outcome'] == 'unknown'
+    assert state['missing_task_ids'] == [requested['id']]
 
 
 def test_playlist_round_trip_waits_for_each_task(client):
