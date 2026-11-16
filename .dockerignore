@@ -107,3 +107,9 @@ tests/
 assets/
 docs/
 Support/
+
+# Experimental PR 2115 context exclusions
+webui/src/test/
+webui/src/**/*.test.*
+webui/src/**/*.spec.*
+webui/src/**/__fixtures__/

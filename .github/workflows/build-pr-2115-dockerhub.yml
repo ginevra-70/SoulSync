@@ -1,0 +1,217 @@
+name: Experimental SoulSync PR 2115 Docker Hub image
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Scan the fixed source history, or request a publication attempt
+        required: true
+        type: choice
+        options:
+          - scan
+          - publish
+      authorize_publish:
+        description: Required confirmation for publishing; ignored in scan mode
+        required: true
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - 'yes'
+
+permissions: {}
+
+concurrency:
+  group: soulsync-pr-2115-dockerhub
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    if: >-
+      github.repository == 'ginevra-70/SoulSync' &&
+      github.event.repository.owner.login == 'ginevra-70' &&
+      inputs.mode == 'scan'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify workflow repository and default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_REPOSITORY: ${{ github.repository }}
+          DISPATCH_OWNER: ${{ github.event.repository.owner.login }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_REF_TYPE: ${{ github.ref_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$(gh api repos/ginevra-70/SoulSync)"
+          [[ "$DISPATCH_REPOSITORY" == 'ginevra-70/SoulSync' ]]
+          [[ "$DISPATCH_OWNER" == 'ginevra-70' ]]
+          [[ "$(jq -r '.full_name' <<<"$metadata")" == 'ginevra-70/SoulSync' ]]
+          default_branch="$(jq -r '.default_branch' <<<"$metadata")"
+          [[ "$DISPATCH_REF_TYPE" == 'branch' ]]
+          [[ "$DISPATCH_REF" == "refs/heads/$default_branch" ]]
+      - name: Check out exact source commit and its history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ginevra-70/SoulSync
+          ref: 8a94131ab8ec8e962d522fecd815d4ce29aed0ac
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source branch and exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='8a94131ab8ec8e962d522fecd815d4ce29aed0ac'
+          [[ "$(git rev-parse HEAD)" == "$expected" ]]
+          branch_sha="$(gh api repos/ginevra-70/SoulSync/branches/fix%2Fmusic-assistant-scan-reliability --jq '.commit.sha')"
+          [[ "$branch_sha" == "$expected" ]]
+      - name: Scan reachable Git history with Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: 8.24.3
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+          GITLEAKS_ENABLE_SUMMARY: 'false'
+
+  publish:
+    if: >-
+      github.repository == 'ginevra-70/SoulSync' &&
+      github.event.repository.owner.login == 'ginevra-70' &&
+      inputs.mode == 'publish' &&
+      inputs.authorize_publish == 'yes'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify workflow repository, branch, and publish confirmation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_REPOSITORY: ${{ github.repository }}
+          DISPATCH_OWNER: ${{ github.event.repository.owner.login }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_REF_TYPE: ${{ github.ref_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$(gh api repos/ginevra-70/SoulSync)"
+          [[ "$DISPATCH_REPOSITORY" == 'ginevra-70/SoulSync' ]]
+          [[ "$DISPATCH_OWNER" == 'ginevra-70' ]]
+          [[ "$(jq -r '.full_name' <<<"$metadata")" == 'ginevra-70/SoulSync' ]]
+          default_branch="$(jq -r '.default_branch' <<<"$metadata")"
+          [[ "$DISPATCH_REF_TYPE" == 'branch' ]]
+          [[ "$DISPATCH_REF" == "refs/heads/$default_branch" ]]
+          [[ '${{ inputs.authorize_publish }}' == 'yes' ]]
+      - name: Check out exact source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ginevra-70/SoulSync
+          ref: 8a94131ab8ec8e962d522fecd815d4ce29aed0ac
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source branch, commit, and clean checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='8a94131ab8ec8e962d522fecd815d4ce29aed0ac'
+          [[ "$(git rev-parse HEAD)" == "$expected" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          branch_sha="$(gh api repos/ginevra-70/SoulSync/branches/fix%2Fmusic-assistant-scan-reliability --jq '.commit.sha')"
+          [[ "$branch_sha" == "$expected" ]]
+          [[ -n "$DOCKERHUB_NAMESPACE" ]]
+          [[ "$DOCKERHUB_NAMESPACE" =~ ^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$ ]]
+          printf 'DOCKERHUB_IMAGE=%s/soulsync:pr-2115\n' "$DOCKERHUB_NAMESPACE" >> "$GITHUB_ENV"
+      - name: Scan source Git history with Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: 8.24.3
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+          GITLEAKS_ENABLE_SUMMARY: 'false'
+      - name: Verify existing Docker Hub repository is private and tag is absent
+        id: hub_precheck
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" && -n "$DOCKERHUB_NAMESPACE" ]]
+          [[ "$DOCKERHUB_NAMESPACE" =~ ^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$ ]]
+          hub_token="$(jq -n --arg identifier "$DOCKERHUB_USERNAME" --arg secret "$DOCKERHUB_TOKEN" '{identifier:$identifier,secret:$secret}' | \
+            curl --fail --silent --show-error --request POST \
+              --header 'Content-Type: application/json' \
+              --data-binary @- https://hub.docker.com/v2/auth/token | jq -er '.access_token')"
+          repo="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $hub_token" \
+            "https://hub.docker.com/v2/namespaces/$DOCKERHUB_NAMESPACE/repositories/soulsync")"
+          [[ "$(jq -r '.namespace' <<<"$repo" | tr '[:upper:]' '[:lower:]')" == "${DOCKERHUB_NAMESPACE,,}" ]]
+          [[ "$(jq -r '.name' <<<"$repo")" == 'soulsync' ]]
+          [[ "$(jq -r '.is_private' <<<"$repo")" == 'true' ]]
+          status="$(curl --silent --show-error --output /tmp/hub-tag.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $hub_token" \
+            "https://hub.docker.com/v2/namespaces/$DOCKERHUB_NAMESPACE/repositories/soulsync/tags/pr-2115")"
+          if [[ "$status" == '200' ]]; then
+            echo 'Docker Hub tag pr-2115 already exists; refusing to overwrite it.' >&2
+            exit 1
+          fi
+          [[ "$status" == '404' ]]
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Sign in to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Recheck privacy and tag immediately before build-and-push
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" && -n "$DOCKERHUB_NAMESPACE" ]]
+          [[ "$DOCKERHUB_NAMESPACE" =~ ^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$ ]]
+          hub_token="$(jq -n --arg identifier "$DOCKERHUB_USERNAME" --arg secret "$DOCKERHUB_TOKEN" '{identifier:$identifier,secret:$secret}' | \
+            curl --fail --silent --show-error --request POST \
+              --header 'Content-Type: application/json' \
+              --data-binary @- https://hub.docker.com/v2/auth/token | jq -er '.access_token')"
+          repo="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $hub_token" \
+            "https://hub.docker.com/v2/namespaces/$DOCKERHUB_NAMESPACE/repositories/soulsync")"
+          [[ "$(jq -r '.namespace' <<<"$repo" | tr '[:upper:]' '[:lower:]')" == "${DOCKERHUB_NAMESPACE,,}" ]]
+          [[ "$(jq -r '.name' <<<"$repo")" == 'soulsync' ]]
+          [[ "$(jq -r '.is_private' <<<"$repo")" == 'true' ]]
+          status="$(curl --silent --show-error --output /tmp/hub-tag.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $hub_token" \
+            "https://hub.docker.com/v2/namespaces/$DOCKERHUB_NAMESPACE/repositories/soulsync/tags/pr-2115")"
+          if [[ "$status" == '200' ]]; then
+            echo 'Docker Hub tag pr-2115 now exists; refusing to overwrite it.' >&2
+            exit 1
+          fi
+          [[ "$status" == '404' ]]
+      - name: Build and publish only pr-2115
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.DOCKERHUB_IMAGE }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/ginevra-70/SoulSync
+            org.opencontainers.image.revision=8a94131ab8ec8e962d522fecd815d4ce29aed0ac
+            org.opencontainers.image.version=pr-2115
