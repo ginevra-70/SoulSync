@@ -68,16 +68,42 @@ jobs:
           set -euo pipefail
           expected='8a94131ab8ec8e962d522fecd815d4ce29aed0ac'
           [[ "$(git rev-parse HEAD)" == "$expected" ]]
+          [[ -z "$(git status --porcelain)" ]]
           branch_sha="$(gh api repos/ginevra-70/SoulSync/branches/fix%2Fmusic-assistant-scan-reliability --jq '.commit.sha')"
           [[ "$branch_sha" == "$expected" ]]
-      - name: Scan reachable Git history with Gitleaks
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITLEAKS_VERSION: 8.24.3
-          GITLEAKS_ENABLE_COMMENTS: 'false'
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
-          GITLEAKS_ENABLE_SUMMARY: 'false'
+      - name: Set up Buildx for Docker ignore processing
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Export the Docker-filtered source context
+        shell: bash
+        run: |
+          set -euo pipefail
+          context_dir="$RUNNER_TEMP/soulsync-docker-context"
+          scan_dir="$RUNNER_TEMP/soulsync-build-inputs"
+          exporter="$RUNNER_TEMP/context-export.Dockerfile"
+          exporter_ignore="$exporter.dockerignore"
+          rm -rf -- "$context_dir" "$scan_dir"
+          rm -f -- "$exporter" "$exporter_ignore"
+          mkdir -p "$scan_dir/build-inputs"
+          cp .dockerignore "$exporter_ignore"
+          cat > "$exporter" <<'EOF'
+          FROM scratch
+          COPY . /
+          EOF
+          docker buildx build \
+            --file "$exporter" \
+            --output "type=local,dest=$context_dir" \
+            "$GITHUB_WORKSPACE"
+          cp -a "$context_dir/." "$scan_dir/"
+          cp Dockerfile .dockerignore "$scan_dir/build-inputs/"
+      - name: Scan exact Docker build inputs with Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --pull=always --network=none --read-only \
+            --cap-drop=ALL --security-opt=no-new-privileges \
+            --volume "$RUNNER_TEMP/soulsync-build-inputs:/scan:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055 \
+            dir --redact=100 --no-banner /scan
 
   publish:
     if: >-
@@ -129,14 +155,39 @@ jobs:
           [[ -n "$DOCKERHUB_NAMESPACE" ]]
           [[ "$DOCKERHUB_NAMESPACE" =~ ^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$ ]]
           printf 'DOCKERHUB_IMAGE=%s/soulsync:pr-2115\n' "$DOCKERHUB_NAMESPACE" >> "$GITHUB_ENV"
-      - name: Scan source Git history with Gitleaks
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITLEAKS_VERSION: 8.24.3
-          GITLEAKS_ENABLE_COMMENTS: 'false'
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
-          GITLEAKS_ENABLE_SUMMARY: 'false'
+      - name: Set up Buildx for Docker ignore processing
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Export the Docker-filtered source context
+        shell: bash
+        run: |
+          set -euo pipefail
+          context_dir="$RUNNER_TEMP/soulsync-docker-context"
+          scan_dir="$RUNNER_TEMP/soulsync-build-inputs"
+          exporter="$RUNNER_TEMP/context-export.Dockerfile"
+          exporter_ignore="$exporter.dockerignore"
+          rm -rf -- "$context_dir" "$scan_dir"
+          rm -f -- "$exporter" "$exporter_ignore"
+          mkdir -p "$scan_dir/build-inputs"
+          cp .dockerignore "$exporter_ignore"
+          cat > "$exporter" <<'EOF'
+          FROM scratch
+          COPY . /
+          EOF
+          docker buildx build \
+            --file "$exporter" \
+            --output "type=local,dest=$context_dir" \
+            "$GITHUB_WORKSPACE"
+          cp -a "$context_dir/." "$scan_dir/"
+          cp Dockerfile .dockerignore "$scan_dir/build-inputs/"
+      - name: Scan exact Docker build inputs with Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --pull=always --network=none --read-only \
+            --cap-drop=ALL --security-opt=no-new-privileges \
+            --volume "$RUNNER_TEMP/soulsync-build-inputs:/scan:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055 \
+            dir --redact=100 --no-banner /scan
       - name: Verify existing Docker Hub repository is private and tag is absent
         id: hub_precheck
         env:
@@ -168,8 +219,6 @@ jobs:
           [[ "$status" == '404' ]]
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Sign in to Docker Hub
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
