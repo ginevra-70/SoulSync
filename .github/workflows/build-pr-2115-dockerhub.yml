@@ -101,6 +101,8 @@ jobs:
           set -euo pipefail
           docker run --rm --pull=always --network=none --read-only \
             --cap-drop=ALL --security-opt=no-new-privileges \
+            --env GITLEAKS_CONFIG= \
+            --env $'GITLEAKS_CONFIG_TOML=[extend]\nuseDefault = true' \
             --volume "$RUNNER_TEMP/soulsync-build-inputs:/scan:ro" \
             ghcr.io/gitleaks/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055 \
             dir --redact=100 --no-banner /scan
@@ -185,6 +187,8 @@ jobs:
           set -euo pipefail
           docker run --rm --pull=always --network=none --read-only \
             --cap-drop=ALL --security-opt=no-new-privileges \
+            --env GITLEAKS_CONFIG= \
+            --env $'GITLEAKS_CONFIG_TOML=[extend]\nuseDefault = true' \
             --volume "$RUNNER_TEMP/soulsync-build-inputs:/scan:ro" \
             ghcr.io/gitleaks/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055 \
             dir --redact=100 --no-banner /scan
